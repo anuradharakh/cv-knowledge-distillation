@@ -1,0 +1,14 @@
+seed: 0
+
+distillation:
+  temperature: 4
+  alpha: 0.7
+
+training:
+  epochs: 50
+  batch_size_labeled: 16
+  batch_size_unlabeled: 32
+  learning_rate: 0.001
+
+sweep:
+  temperatures: [1, 2, 4, 8]
