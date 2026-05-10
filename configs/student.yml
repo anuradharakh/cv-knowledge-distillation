@@ -4,6 +4,7 @@ model:
   image_size: 96
   num_classes: 7
   dropout: 0.3
+  max_params: 500000
 
 training:
   batch_size: 16

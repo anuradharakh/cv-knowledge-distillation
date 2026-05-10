@@ -9,3 +9,8 @@ training:
   batch_size: 16
   epochs: 10
   learning_rate: 0.0003
+
+outputs:
+  checkpoint: outputs/checkpoints/teacher_efficientnet_b0.pth
+  logits: outputs/predictions/teacher_soft_labels.npy
+  filenames: outputs/predictions/teacher_filenames.txt
