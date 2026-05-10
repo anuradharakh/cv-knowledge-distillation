@@ -1,266 +1,244 @@
-"""
-=============================================================================
-ML2 Homework 2 — train_teacher.py
-=============================================================================
-Train a large pretrained TEACHER and cache its logits on unlabeled images.
-
-The teacher is a training tool only. It is intentionally larger than the
-500,000-parameter deployment limit and must NOT be submitted to the client.
-Only the student model produced by train_baby.py or distill.py is submitted.
-
-Default teacher:
-  EfficientNet-B0 pretrained on ImageNet, with its classifier replaced by a
-  7-class head.
-
-Run:
-  python train_teacher.py
-
-Optional:
-  python train_teacher.py --backbone resnet18 --epochs 15
-
-Outputs:
-  teacher_<backbone>.pth       — cached teacher weights for reuse
-  teacher_soft_labels.npy      — pre-softmax teacher logits on unlabeled images
-  teacher_filenames.txt        — filename order matching the logits
-=============================================================================
-"""
 from pathlib import Path
-import argparse
-import random
 
 import numpy as np
-import pandas as pd
-from PIL import Image
 import torch
-
-# Compatibility guard for environments where torchvision is installed without
-# compiled custom ops such as torchvision::nms. It is harmless when the op
-# already exists and lets torchvision import cleanly in CPU-only notebooks.
-try:
-    from torch.library import Library
-    _tv_lib = Library("torchvision", "DEF")
-    _tv_lib.define("nms(Tensor dets, Tensor scores, float iou_threshold) -> Tensor")
-except Exception:
-    pass
-
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
+import torchvision
 from torch.utils.data import DataLoader, Dataset, random_split
 
-TRAIN_ROOT = Path(__file__).parent / "train"
-UNLABELED_ROOT = Path(__file__).parent / "unlabeled"
-NUM_CLASSES = 7
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+from src.utils import ensure_dir, get_device, load_config, set_seed
 
 
-def set_seed(seed: int = 0) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = True
+TRAIN_ROOT = Path("train")
+UNLABELED_ROOT = Path("unlabeled")
+CONFIG_PATH = Path("configs/teacher.yml")
 
 
-class LabeledDataset(Dataset):
-    def __init__(self, root: Path, size: int = 224, augment: bool = False):
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
+class TeacherLabeledDataset(Dataset):
+    def __init__(self, root, image_size):
         self.root = Path(root)
-        self.df = pd.read_csv(root / "labels.csv")
-        self.size = size
-        self.augment = augment
+        self.df = __import__("pandas").read_csv(self.root / "labels.csv")
+        self.image_size = image_size
 
     def __len__(self):
         return len(self.df)
 
-    def _load_image(self, filename: str) -> torch.Tensor:
-        with Image.open(self.root / filename) as im:
-            im = im.convert("RGB")
-            arr = np.asarray(im, dtype=np.float32) / 255.0
-        return torch.from_numpy(arr).permute(2, 0, 1)
-
-    def _augment(self, img: torch.Tensor) -> torch.Tensor:
-        if torch.rand(()) < 0.5:
-            img = torch.flip(img, dims=[2])
-        if torch.rand(()) < 0.8:
-            brightness = 0.85 + 0.30 * torch.rand(())
-            contrast = 0.85 + 0.30 * torch.rand(())
-            mean = img.mean(dim=(1, 2), keepdim=True)
-            img = (img - mean) * contrast + mean
-            img = (img * brightness).clamp(0.0, 1.0)
-        return img
-
     def __getitem__(self, i):
         row = self.df.iloc[i]
-        img = self._load_image(row["filename"])
-        if self.augment:
-            img = self._augment(img)
-        img = F.interpolate(img.unsqueeze(0), size=(self.size, self.size),
-                            mode="bilinear", align_corners=False).squeeze(0)
-        img = (img - IMAGENET_MEAN) / IMAGENET_STD
+        img = torchvision.io.read_image(str(self.root / row["filename"]))
+
+        if img.shape[0] == 1:
+            img = img.repeat(3, 1, 1)
+        elif img.shape[0] == 4:
+            img = img[:3]
+
+        img = img.float() / 255.0
+        img = F.interpolate(
+            img.unsqueeze(0),
+            size=self.image_size,
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+
+        img = (img - IMAGENET_MEAN.squeeze(0)) / IMAGENET_STD.squeeze(0)
         return img, int(row["label"])
 
 
-class UnlabeledDataset(Dataset):
-    def __init__(self, root: Path, size: int = 224):
+class TeacherUnlabeledDataset(Dataset):
+    def __init__(self, root, image_size):
         self.root = Path(root)
-        self.filenames = sorted(p.name for p in root.glob("*.jpg"))
-        self.size = size
+        self.filenames = sorted(p.name for p in self.root.glob("*.jpg"))
+        self.image_size = image_size
 
     def __len__(self):
         return len(self.filenames)
 
     def __getitem__(self, i):
         fn = self.filenames[i]
-        with Image.open(self.root / fn) as im:
-            im = im.convert("RGB")
-            arr = np.asarray(im, dtype=np.float32) / 255.0
-        img = torch.from_numpy(arr).permute(2, 0, 1)
-        img = F.interpolate(img.unsqueeze(0), size=(self.size, self.size),
-                            mode="bilinear", align_corners=False).squeeze(0)
-        img = (img - IMAGENET_MEAN) / IMAGENET_STD
+        img = torchvision.io.read_image(str(self.root / fn))
+
+        if img.shape[0] == 1:
+            img = img.repeat(3, 1, 1)
+        elif img.shape[0] == 4:
+            img = img[:3]
+
+        img = img.float() / 255.0
+        img = F.interpolate(
+            img.unsqueeze(0),
+            size=self.image_size,
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+
+        img = (img - IMAGENET_MEAN.squeeze(0)) / IMAGENET_STD.squeeze(0)
         return img, fn
 
 
-def build_teacher(backbone: str, num_classes: int = NUM_CLASSES) -> nn.Module:
-    backbone = backbone.lower()
+def build_teacher(backbone, num_classes=7, pretrained=True):
+    if backbone != "efficientnet_b0":
+        raise ValueError("Currently supported teacher backbone: efficientnet_b0")
 
-    if backbone == "efficientnet_b0":
-        m = models.efficientnet_b0(
-            weights=models.EfficientNet_B0_Weights.DEFAULT
-        )
-        in_features = m.classifier[1].in_features
-        m.classifier[1] = nn.Linear(in_features, num_classes)
-        return m
+    weights = (
+        torchvision.models.EfficientNet_B0_Weights.DEFAULT
+        if pretrained
+        else None
+    )
 
-    if backbone == "resnet18":
-        m = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        in_features = m.fc.in_features
-        m.fc = nn.Linear(in_features, num_classes)
-        return m
+    model = torchvision.models.efficientnet_b0(weights=weights)
+    in_features = model.classifier[1].in_features
+    model.classifier[1] = nn.Linear(in_features, num_classes)
 
-    if backbone == "resnet50":
-        m = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-        in_features = m.fc.in_features
-        m.fc = nn.Linear(in_features, num_classes)
-        return m
-
-    raise ValueError("Supported backbones: efficientnet_b0, resnet18, resnet50")
+    return model
 
 
-def fine_tune(model, train_loader, val_loader, epochs: int, device, lr: float, weight_decay: float):
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+def fine_tune(model, train_loader, val_loader, epochs, learning_rate, device):
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     best_val = -1.0
     best_state = None
+
     for epoch in range(1, epochs + 1):
         model.train()
-        loss_sum, correct, total = 0.0, 0, 0
+        total_loss, total = 0.0, 0
+
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
-            logits = model(x)
-            loss = F.cross_entropy(logits, y, label_smoothing=0.03)
-            opt.zero_grad(set_to_none=True)
+
+            loss = F.cross_entropy(model(x), y)
+
+            optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            opt.step()
-            loss_sum += loss.item() * x.size(0)
-            correct += (logits.argmax(1) == y).sum().item()
+            optimizer.step()
+
+            total_loss += loss.item() * x.size(0)
             total += x.size(0)
 
-        scheduler.step()
-        val_acc = evaluate(model, val_loader, device)
-        if val_acc > best_val:
-            best_val = val_acc
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        model.eval()
+        correct, count = 0, 0
+
+        with torch.inference_mode():
+            for x, y in val_loader:
+                x, y = x.to(device), y.to(device)
+                logits = model(x)
+                correct += (logits.argmax(1) == y).sum().item()
+                count += x.size(0)
+
+        val_acc = correct / count
 
         print(
-            f"Epoch {epoch:3d}  train_loss={loss_sum / total:.4f}  "
-            f"train_acc={correct / total:.4f}  val_acc={val_acc:.4f}  "
-            f"lr={opt.param_groups[0]['lr']:.6f}"
+            f"Epoch {epoch:03d} "
+            f"train_loss={total_loss / total:.4f} "
+            f"val_acc={val_acc:.4f}"
         )
+
+        if val_acc > best_val:
+            best_val = val_acc
+            best_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    print(f"Best teacher val_acc={best_val:.4f}")
+
+    return best_val
 
 
 @torch.inference_mode()
-def evaluate(model, loader, device):
+def dump_soft_labels(model, loader, device, logits_path, filenames_path):
     model.eval()
-    correct, total = 0, 0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        correct += (model(x).argmax(1) == y).sum().item()
-        total += x.size(0)
-    return correct / total
 
+    all_logits = []
+    all_filenames = []
 
-@torch.inference_mode()
-def dump_soft_labels(model, unlabeled_loader, device, out_path: Path, filenames_out: Path):
-    model.eval()
-    all_logits, all_filenames = [], []
-    for x, fns in unlabeled_loader:
+    for x, filenames in loader:
         x = x.to(device)
-        logits = model(x).cpu().numpy().astype("float32")
+        logits = model(x).cpu().numpy()
+
         all_logits.append(logits)
-        all_filenames.extend(fns)
-    logits = np.concatenate(all_logits, axis=0)
-    np.save(out_path, logits)
-    filenames_out.write_text("\n".join(all_filenames) + "\n")
-    print(f"Saved {out_path.name} shape={logits.shape}")
-    print(f"Saved filename index -> {filenames_out.name}")
+        all_filenames.extend(filenames)
+
+    logits_path = Path(logits_path)
+    filenames_path = Path(filenames_path)
+
+    ensure_dir(logits_path.parent)
+    ensure_dir(filenames_path.parent)
+
+    np.save(logits_path, np.concatenate(all_logits, axis=0))
+    filenames_path.write_text("\n".join(all_filenames) + "\n")
+
+    print(f"Saved teacher logits to {logits_path}")
+    print(f"Saved teacher filenames to {filenames_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--backbone", type=str, default="efficientnet_b0",
-                        choices=["efficientnet_b0", "resnet18", "resnet50"])
-    parser.add_argument("--epochs", type=int, default=15)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--force-retrain", action="store_true")
-    args = parser.parse_args()
+    cfg = load_config(CONFIG_PATH)
+    set_seed(cfg["seed"])
 
-    set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    state_path = Path(__file__).parent / f"teacher_{args.backbone}.pth"
+    device = get_device()
 
-    plain = LabeledDataset(TRAIN_ROOT, size=args.image_size, augment=False)
-    n_val = max(1, len(plain) // 5)
-    n_train = len(plain) - n_val
+    image_size = cfg["teacher"]["image_size"]
+    batch_size = cfg["training"]["batch_size"]
+
+    labeled = TeacherLabeledDataset(TRAIN_ROOT, image_size=image_size)
+
+    n_val = max(1, len(labeled) // 5)
+    n_train = len(labeled) - n_val
+
     train_ds, val_ds = random_split(
-        plain, [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
+        labeled,
+        [n_train, n_val],
+        generator=torch.Generator().manual_seed(cfg["seed"]),
     )
-    aug = LabeledDataset(TRAIN_ROOT, size=args.image_size, augment=True)
-    train_ds.dataset = aug
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
-    teacher = build_teacher(args.backbone).to(device)
-    print(f"Teacher backbone: {args.backbone}")
-    print(f"Teacher parameters: {sum(p.numel() for p in teacher.parameters()):,}")
+    teacher = build_teacher(
+        backbone=cfg["teacher"]["backbone"],
+        num_classes=7,
+        pretrained=cfg["teacher"]["pretrained"],
+    ).to(device)
 
-    if state_path.exists() and not args.force_retrain:
-        teacher.load_state_dict(torch.load(state_path, map_location=device))
-        print(f"Loaded teacher weights from {state_path.name}")
+    checkpoint_path = Path(cfg["outputs"]["checkpoint"])
+    ensure_dir(checkpoint_path.parent)
+
+    if checkpoint_path.exists():
+        teacher.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        print(f"Loaded teacher checkpoint from {checkpoint_path}")
     else:
-        fine_tune(teacher, train_loader, val_loader, args.epochs, device, args.lr, args.weight_decay)
-        torch.save(teacher.state_dict(), state_path)
-        print(f"Saved teacher weights -> {state_path.name}")
+        best_val = fine_tune(
+            teacher,
+            train_loader,
+            val_loader,
+            epochs=cfg["training"]["epochs"],
+            learning_rate=cfg["training"]["learning_rate"],
+            device=device,
+        )
 
-    unlabeled = UnlabeledDataset(UNLABELED_ROOT, size=args.image_size)
-    unlabeled_loader = DataLoader(unlabeled, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        torch.save(teacher.state_dict(), checkpoint_path)
+        print(f"Saved teacher checkpoint to {checkpoint_path}")
+        print(f"Best teacher val_acc={best_val:.4f}")
+
+    unlabeled = TeacherUnlabeledDataset(UNLABELED_ROOT, image_size=image_size)
+
+    unlabeled_loader = DataLoader(
+        unlabeled,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
     dump_soft_labels(
-        teacher, unlabeled_loader, device,
-        out_path=Path(__file__).parent / "teacher_soft_labels.npy",
-        filenames_out=Path(__file__).parent / "teacher_filenames.txt",
+        teacher,
+        unlabeled_loader,
+        device,
+        logits_path=cfg["outputs"]["logits"],
+        filenames_path=cfg["outputs"]["filenames"],
     )
 
 
