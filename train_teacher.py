@@ -15,7 +15,6 @@ TRAIN_ROOT = Path("train")
 UNLABELED_ROOT = Path("unlabeled")
 CONFIG_PATH = Path("configs/teacher.yml")
 
-
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
@@ -97,10 +96,7 @@ def build_index_split(dataset_size, seed):
         generator=torch.Generator().manual_seed(seed),
     ).tolist()
 
-    train_indices = indices[:n_train]
-    val_indices = indices[n_train:]
-
-    return train_indices, val_indices
+    return indices[:n_train], indices[n_train:]
 
 
 def build_teacher(backbone, num_classes=7, pretrained=True):
@@ -114,15 +110,41 @@ def build_teacher(backbone, num_classes=7, pretrained=True):
     )
 
     model = torchvision.models.efficientnet_b0(weights=weights)
-
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
 
     return model
 
 
-def fine_tune(model, train_loader, val_loader, epochs, learning_rate, device):
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+def build_optimizer(model, cfg):
+    opt_type = cfg["training"].get("optimizer", "adam").lower()
+    lr = cfg["training"]["learning_rate"]
+    weight_decay = cfg["training"].get("weight_decay", 0.0)
+
+    if opt_type == "adamw":
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay,
+        )
+
+    if opt_type == "adam":
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay,
+        )
+
+    raise ValueError(f"Unsupported optimizer: {opt_type}")
+
+
+def fine_tune(model, train_loader, val_loader, cfg, device):
+    optimizer = build_optimizer(model, cfg)
+
+    label_smoothing = cfg["training"].get("label_smoothing", 0.0)
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    epochs = cfg["training"]["epochs"]
 
     best_val = -1.0
     best_state = None
@@ -135,7 +157,7 @@ def fine_tune(model, train_loader, val_loader, epochs, learning_rate, device):
             x, y = x.to(device), y.to(device)
 
             logits = model(x)
-            loss = F.cross_entropy(logits, y)
+            loss = criterion(logits, y)
 
             optimizer.zero_grad()
             loss.backward()
@@ -214,6 +236,7 @@ def main():
     batch_size = cfg["training"]["batch_size"]
 
     full_dataset = TeacherLabeledDataset(TRAIN_ROOT, image_size=image_size)
+
     train_indices, val_indices = build_index_split(
         len(full_dataset),
         seed=cfg["seed"],
@@ -264,8 +287,7 @@ def main():
             teacher,
             train_loader,
             val_loader,
-            epochs=cfg["training"]["epochs"],
-            learning_rate=cfg["training"]["learning_rate"],
+            cfg=cfg,
             device=device,
         )
 

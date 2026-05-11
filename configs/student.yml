@@ -6,9 +6,9 @@ data:
 model:
   image_size: 96
   num_classes: 7
-  dropout: 0.4
+  dropout: 0.3
   max_params: 500000
-  channels: [32, 64, 112, 160, 224, 288, 384, 448]
+  # channels: [32, 64, 112, 160, 224, 288, 384, 448]
 
 training:
   batch_size: 16
