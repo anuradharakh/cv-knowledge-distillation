@@ -8,9 +8,14 @@ from torch.utils.data import Dataset
 
 
 class ImageDataset(Dataset):
-    def __init__(self, root):
+    def __init__(self, root, indices=None, transform=None):
         self.root = Path(root)
         self.df = pd.read_csv(self.root / "labels.csv")
+
+        if indices is not None:
+            self.df = self.df.iloc[indices].reset_index(drop=True)
+
+        self.transform = transform
 
     def __len__(self):
         return len(self.df)
@@ -25,6 +30,10 @@ class ImageDataset(Dataset):
             img = img[:3]
 
         img = img.float() / 255.0
+
+        if self.transform is not None:
+            img = self.transform(img)
+
         return img, int(row["label"])
 
 
@@ -52,4 +61,5 @@ class UnlabeledWithSoftLabels(Dataset):
 
         img = img.float() / 255.0
         logits = torch.tensor(self.logits[i], dtype=torch.float32)
+
         return img, logits

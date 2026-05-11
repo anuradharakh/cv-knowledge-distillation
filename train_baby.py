@@ -2,11 +2,12 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
 
 from src.datasets import ImageDataset
 from src.models import build_student
-from src.utils import count_params, get_device, load_config, set_seed
+from src.utils import count_params, dataloader_kwargs, get_device, load_config, set_seed
 
 
 DATA_ROOT = Path("train")
@@ -49,35 +50,70 @@ def evaluate(model, loader, device):
     return correct / total
 
 
+def build_index_split(dataset_size, seed):
+    n_val = max(1, dataset_size // 5)
+    n_train = dataset_size - n_val
+
+    indices = torch.randperm(
+        dataset_size,
+        generator=torch.Generator().manual_seed(seed),
+    ).tolist()
+
+    train_indices = indices[:n_train]
+    val_indices = indices[n_train:]
+
+    return train_indices, val_indices
+
+
 def main():
     cfg = load_config(CONFIG_PATH)
     set_seed(cfg["seed"])
 
     device = get_device()
+    print(f"Using device: {device}")
 
-    dataset = ImageDataset(DATA_ROOT)
+    train_transform = T.Compose([
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomRotation(degrees=10),
+        T.ColorJitter(
+            brightness=0.15,
+            contrast=0.15,
+            saturation=0.10,
+        ),
+    ])
 
-    n_val = max(1, len(dataset) // 5)
-    n_train = len(dataset) - n_val
-
-    train_ds, val_ds = random_split(
-        dataset,
-        [n_train, n_val],
-        generator=torch.Generator().manual_seed(cfg["seed"]),
+    full_dataset = ImageDataset(DATA_ROOT)
+    train_indices, val_indices = build_index_split(
+        len(full_dataset),
+        seed=cfg["seed"],
     )
+
+    train_ds = ImageDataset(
+        DATA_ROOT,
+        indices=train_indices,
+        transform=train_transform,
+    )
+
+    val_ds = ImageDataset(
+        DATA_ROOT,
+        indices=val_indices,
+        transform=None,
+    )
+
+    loader_kwargs = dataloader_kwargs(cfg.get("data", {}).get("num_workers", 0))
 
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg["training"]["batch_size"],
         shuffle=True,
-        num_workers=0,
+        **loader_kwargs,
     )
 
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg["training"]["batch_size"],
         shuffle=False,
-        num_workers=0,
+        **loader_kwargs,
     )
 
     model = build_student(
@@ -109,7 +145,10 @@ def main():
 
     for epoch in range(1, cfg["training"]["epochs"] + 1):
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, optimizer, device
+            model,
+            train_loader,
+            optimizer,
+            device,
         )
 
         val_acc = evaluate(model, val_loader, device)

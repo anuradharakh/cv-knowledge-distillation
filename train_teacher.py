@@ -1,13 +1,14 @@
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 
-from src.utils import ensure_dir, get_device, load_config, set_seed
+from src.utils import dataloader_kwargs, ensure_dir, get_device, load_config, set_seed
 
 
 TRAIN_ROOT = Path("train")
@@ -20,9 +21,13 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 class TeacherLabeledDataset(Dataset):
-    def __init__(self, root, image_size):
+    def __init__(self, root, image_size, indices=None):
         self.root = Path(root)
-        self.df = __import__("pandas").read_csv(self.root / "labels.csv")
+        self.df = pd.read_csv(self.root / "labels.csv")
+
+        if indices is not None:
+            self.df = self.df.iloc[indices].reset_index(drop=True)
+
         self.image_size = image_size
 
     def __len__(self):
@@ -38,6 +43,7 @@ class TeacherLabeledDataset(Dataset):
             img = img[:3]
 
         img = img.float() / 255.0
+
         img = F.interpolate(
             img.unsqueeze(0),
             size=self.image_size,
@@ -46,6 +52,7 @@ class TeacherLabeledDataset(Dataset):
         ).squeeze(0)
 
         img = (img - IMAGENET_MEAN.squeeze(0)) / IMAGENET_STD.squeeze(0)
+
         return img, int(row["label"])
 
 
@@ -68,6 +75,7 @@ class TeacherUnlabeledDataset(Dataset):
             img = img[:3]
 
         img = img.float() / 255.0
+
         img = F.interpolate(
             img.unsqueeze(0),
             size=self.image_size,
@@ -76,7 +84,23 @@ class TeacherUnlabeledDataset(Dataset):
         ).squeeze(0)
 
         img = (img - IMAGENET_MEAN.squeeze(0)) / IMAGENET_STD.squeeze(0)
+
         return img, fn
+
+
+def build_index_split(dataset_size, seed):
+    n_val = max(1, dataset_size // 5)
+    n_train = dataset_size - n_val
+
+    indices = torch.randperm(
+        dataset_size,
+        generator=torch.Generator().manual_seed(seed),
+    ).tolist()
+
+    train_indices = indices[:n_train]
+    val_indices = indices[n_train:]
+
+    return train_indices, val_indices
 
 
 def build_teacher(backbone, num_classes=7, pretrained=True):
@@ -90,6 +114,7 @@ def build_teacher(backbone, num_classes=7, pretrained=True):
     )
 
     model = torchvision.models.efficientnet_b0(weights=weights)
+
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
 
@@ -109,7 +134,8 @@ def fine_tune(model, train_loader, val_loader, epochs, learning_rate, device):
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
-            loss = F.cross_entropy(model(x), y)
+            logits = model(x)
+            loss = F.cross_entropy(logits, y)
 
             optimizer.zero_grad()
             loss.backward()
@@ -125,6 +151,7 @@ def fine_tune(model, train_loader, val_loader, epochs, learning_rate, device):
             for x, y in val_loader:
                 x, y = x.to(device), y.to(device)
                 logits = model(x)
+
                 correct += (logits.argmax(1) == y).sum().item()
                 count += x.size(0)
 
@@ -181,23 +208,44 @@ def main():
     set_seed(cfg["seed"])
 
     device = get_device()
+    print(f"Using device: {device}")
 
     image_size = cfg["teacher"]["image_size"]
     batch_size = cfg["training"]["batch_size"]
 
-    labeled = TeacherLabeledDataset(TRAIN_ROOT, image_size=image_size)
-
-    n_val = max(1, len(labeled) // 5)
-    n_train = len(labeled) - n_val
-
-    train_ds, val_ds = random_split(
-        labeled,
-        [n_train, n_val],
-        generator=torch.Generator().manual_seed(cfg["seed"]),
+    full_dataset = TeacherLabeledDataset(TRAIN_ROOT, image_size=image_size)
+    train_indices, val_indices = build_index_split(
+        len(full_dataset),
+        seed=cfg["seed"],
     )
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    train_ds = TeacherLabeledDataset(
+        TRAIN_ROOT,
+        image_size=image_size,
+        indices=train_indices,
+    )
+
+    val_ds = TeacherLabeledDataset(
+        TRAIN_ROOT,
+        image_size=image_size,
+        indices=val_indices,
+    )
+
+    loader_kwargs = dataloader_kwargs(cfg.get("data", {}).get("num_workers", 0))
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        **loader_kwargs,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
 
     teacher = build_teacher(
         backbone=cfg["teacher"]["backbone"],
@@ -225,12 +273,16 @@ def main():
         print(f"Saved teacher checkpoint to {checkpoint_path}")
         print(f"Best teacher val_acc={best_val:.4f}")
 
-    unlabeled = TeacherUnlabeledDataset(UNLABELED_ROOT, image_size=image_size)
+    unlabeled = TeacherUnlabeledDataset(
+        UNLABELED_ROOT,
+        image_size=image_size,
+    )
 
     unlabeled_loader = DataLoader(
         unlabeled,
         batch_size=batch_size,
         shuffle=False,
+        **loader_kwargs,
     )
 
     dump_soft_labels(

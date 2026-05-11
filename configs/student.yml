@@ -1,5 +1,8 @@
 seed: 0
 
+data:
+  num_workers: 4
+
 model:
   image_size: 96
   num_classes: 7
@@ -17,3 +20,12 @@ optimizer:
 
 scheduler:
   type: cosine
+
+augmentation:
+  enabled: true
+  horizontal_flip: 0.5
+  rotation_degrees: 10
+  color_jitter:
+    brightness: 0.15
+    contrast: 0.15
+    saturation: 0.10

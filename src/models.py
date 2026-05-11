@@ -33,7 +33,15 @@ class ConvBNAct(nn.Sequential):
 class DWConvBNAct(nn.Sequential):
     def __init__(self, in_ch, out_ch, stride=1):
         super().__init__(
-            nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1, groups=in_ch, bias=False),
+            nn.Conv2d(
+                in_ch,
+                in_ch,
+                3,
+                stride=stride,
+                padding=1,
+                groups=in_ch,
+                bias=False,
+            ),
             nn.BatchNorm2d(in_ch),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_ch, out_ch, 1, bias=False),
@@ -44,23 +52,24 @@ class DWConvBNAct(nn.Sequential):
 
 class SmallCNN(nn.Module):
     """
-    Compact MobileNet-style CNN for deployment.
+    Compact MobileNet-style student CNN.
 
-    Uses depthwise separable convolutions to increase representational capacity
-    while staying safely below the 500K parameter limit.
+    Designed for deployment under the 500,000 parameter limit.
+    Uses depthwise separable convolutions, BatchNorm, ReLU,
+    dropout, and global average pooling.
     """
 
     def __init__(self, num_classes=7, dropout=0.3):
         super().__init__()
 
         self.features = nn.Sequential(
-            ConvBNAct(3, 32, stride=2),       # 96 -> 48
+            ConvBNAct(3, 32, stride=2),        # 96 -> 48
             DWConvBNAct(32, 64, stride=1),
-            DWConvBNAct(64, 96, stride=2),   # 48 -> 24
+            DWConvBNAct(64, 96, stride=2),    # 48 -> 24
             DWConvBNAct(96, 128, stride=1),
-            DWConvBNAct(128, 192, stride=2), # 24 -> 12
+            DWConvBNAct(128, 192, stride=2),  # 24 -> 12
             DWConvBNAct(192, 256, stride=1),
-            DWConvBNAct(256, 320, stride=2), # 12 -> 6
+            DWConvBNAct(256, 320, stride=2),  # 12 -> 6
             DWConvBNAct(320, 384, stride=1),
             nn.AdaptiveAvgPool2d(1),
         )

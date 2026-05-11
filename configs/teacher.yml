@@ -1,5 +1,8 @@
 seed: 0
 
+data:
+  num_workers: 4
+
 teacher:
   backbone: efficientnet_b0
   pretrained: true
