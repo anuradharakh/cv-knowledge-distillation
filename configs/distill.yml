@@ -4,9 +4,9 @@ data:
   num_workers: 4
 
 distillation:
-  temperature: 2
-  alpha: 0.5
-  temperature_sweep: [2]
+  temperature: 4
+  alpha: 0.7
+  temperature_sweep: [2, 4, 6, 8]
 
 training:
   epochs: 50

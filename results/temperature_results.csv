@@ -1,0 +1,5 @@
+temperature,alpha,best_val_acc,best_val_loss,params,model_path
+2.0,0.7,0.4050632911392405,1.7418093379539779,317479,outputs/checkpoints/distilled_T2_alpha0.7.pt
+4.0,0.7,0.3924050632911392,1.7878001732162283,317479,outputs/checkpoints/distilled_T4_alpha0.7.pt
+6.0,0.7,0.3670886075949367,1.8101320870314972,317479,outputs/checkpoints/distilled_T6_alpha0.7.pt
+8.0,0.7,0.3670886075949367,1.7723766037180453,317479,outputs/checkpoints/distilled_T8_alpha0.7.pt
