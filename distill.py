@@ -174,6 +174,7 @@ def run_distillation(temperature, save_model=True):
         num_classes=student_cfg["model"]["num_classes"],
         image_size=student_cfg["model"]["image_size"],
         dropout=student_cfg["model"]["dropout"],
+        channels=student_cfg["model"].get("channels"),
     ).to(device)
 
     n_params = count_params(student)

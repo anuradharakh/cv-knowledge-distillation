@@ -120,6 +120,7 @@ def main():
         num_classes=cfg["model"]["num_classes"],
         image_size=cfg["model"]["image_size"],
         dropout=cfg["model"]["dropout"],
+        channels=cfg["model"].get("channels"),
     ).to(device)
 
     n_params = count_params(model)

@@ -49,7 +49,6 @@ class DWConvBNAct(nn.Sequential):
             nn.ReLU(inplace=True),
         )
 
-
 class SmallCNN(nn.Module):
     """
     Compact MobileNet-style student CNN.
@@ -59,31 +58,39 @@ class SmallCNN(nn.Module):
     dropout, and global average pooling.
     """
 
-    def __init__(self, num_classes=7, dropout=0.3):
+    def __init__(self, num_classes=7, dropout=0.3, channels=None):
         super().__init__()
 
+        if channels is None:
+            channels = [32, 64, 96, 128, 192, 256, 320, 384]
+
+        c1, c2, c3, c4, c5, c6, c7, c8 = channels
+
         self.features = nn.Sequential(
-            ConvBNAct(3, 32, stride=2),        # 96 -> 48
-            DWConvBNAct(32, 64, stride=1),
-            DWConvBNAct(64, 96, stride=2),    # 48 -> 24
-            DWConvBNAct(96, 128, stride=1),
-            DWConvBNAct(128, 192, stride=2),  # 24 -> 12
-            DWConvBNAct(192, 256, stride=1),
-            DWConvBNAct(256, 320, stride=2),  # 12 -> 6
-            DWConvBNAct(320, 384, stride=1),
+            ConvBNAct(3, c1, stride=2),       # 96 -> 48
+            DWConvBNAct(c1, c2, stride=1),
+            DWConvBNAct(c2, c3, stride=2),   # 48 -> 24
+            DWConvBNAct(c3, c4, stride=1),
+            DWConvBNAct(c4, c5, stride=2),   # 24 -> 12
+            DWConvBNAct(c5, c6, stride=1),
+            DWConvBNAct(c6, c7, stride=2),   # 12 -> 6
+            DWConvBNAct(c7, c8, stride=1),
             nn.AdaptiveAvgPool2d(1),
         )
 
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Dropout(dropout),
-            nn.Linear(384, num_classes),
+            nn.Linear(c8, num_classes),
         )
 
     def forward(self, x):
         return self.classifier(self.features(x))
 
-
-def build_student(num_classes=7, image_size=96, dropout=0.3):
-    student = SmallCNN(num_classes=num_classes, dropout=dropout)
+def build_student(num_classes=7, image_size=96, dropout=0.3, channels=None):
+    student = SmallCNN(
+        num_classes=num_classes,
+        dropout=dropout,
+        channels=channels,
+    )
     return Preprocess(student, size=image_size)
